@@ -1,0 +1,15 @@
+[workspace]
+members = [
+    "crates/ula-compose",
+    "crates/ula-core",
+    "crates/ula-protocol",
+    "crates/ula-ptc",
+    "crates/ula-tui",
+]
+resolver = "3"
+
+
+[profile.release]
+lto = true
+strip = true
+opt-level = 2

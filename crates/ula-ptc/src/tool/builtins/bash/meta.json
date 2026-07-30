@@ -1,0 +1,7 @@
+{
+  "name": "Bash",
+  "description": "Run a shell command in the current working directory and return its output, killed after `timeout` seconds",
+  "parameters": ["command: string", "timeout: number = 30"],
+  "exec": "main.sh",
+  "inherit_cwd": true
+}

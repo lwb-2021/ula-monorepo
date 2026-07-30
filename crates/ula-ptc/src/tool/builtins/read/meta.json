@@ -1,0 +1,7 @@
+{
+  "name": "Read",
+  "description": "Read a file",
+  "parameters": ["file: string"],
+  "exec": "main.sh",
+  "inherit_cwd": true
+}

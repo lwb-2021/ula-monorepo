@@ -1,0 +1,9 @@
+agents:
+  - name: Main
+    model: openrouter:nvidia/nemotron-3-ultra-550b-a55b:free
+    default: true
+
+plugins:
+  - ula-ptc # search order: ~/.ula/plugins -> executable path
+
+interface: ula-tui
