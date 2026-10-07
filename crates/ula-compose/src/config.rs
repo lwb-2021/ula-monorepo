@@ -36,8 +36,7 @@ mod tests {
 
     #[test]
     fn compose_config_deserialize() {
-        let config_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("example-config.yaml");
-        let _: ComposeConfig =
-            noyalib::from_str(&fs::read_to_string(&config_dir).unwrap()).unwrap();
+        let config_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("example-config.toml");
+        let _: ComposeConfig = toml::from_str(&fs::read_to_string(&config_dir).unwrap()).unwrap();
     }
 }

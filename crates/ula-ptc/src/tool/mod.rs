@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs::{self, File, Permissions},
+    fs::{self, Permissions},
     os::unix::fs::PermissionsExt,
     path::PathBuf,
     process::Command,
@@ -47,14 +47,14 @@ pub fn list_tools() -> anyhow::Result<Vec<Tool>> {
                         .file_type()?
                         .is_dir()
                         .then(|| {
-                            File::open(entry.path().join("meta.json"))
+                            fs::read_to_string(entry.path().join("meta.toml"))
                                 .with_context(|| {
                                     format!("Failed to load metadata of {}", entry.path().display())
                                 })
-                                .and_then(|file| {
+                                .and_then(|text| {
                                     Ok(Tool {
                                         root: entry.path().to_path_buf(),
-                                        meta: serde_json::from_reader(file)
+                                        meta: toml::from_str(&text)
                                             .context("Failed to deserialize")?,
                                     })
                                 })

@@ -61,7 +61,7 @@ fn main() {
         .or_else(|| {
             #[cfg(debug_assertions)]
             {
-                Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("example-config.yaml"))
+                Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("example-config.toml"))
             }
             #[cfg(not(debug_assertions))]
             None
@@ -69,7 +69,7 @@ fn main() {
         .expect("No config provided");
 
     let config: ComposeConfig =
-        noyalib::from_reader(File::open(&config_path).expect("Failed to open config"))
+        toml::from_str(&std::fs::read_to_string(&config_path).expect("Failed to read config"))
             .expect("Failed to parse config");
 
     if let Err(e) = run(config) {

@@ -22,7 +22,7 @@ or with Nix:
 nix profile add github:lwb-2021/ula-monorepo
 ```
 
-Configuration is still manual — copy `crates/ula-compose/example-config.yaml` and `crates/ula-core/example-config.yaml`, then fill them in. A friendlier way to run it is under development.
+Configuration is still manual — copy `crates/ula-compose/example-config.toml` and `crates/ula-core/example-config.toml`, then fill them in. A friendlier way to run it is under development.
 
 ## Adding a tool
 
@@ -31,25 +31,23 @@ Create `~/.agents/tools/<name>/` with two files and make the script executable:
 ```sh
 ~/.agents/tools/wc/
 ├── main.sh
-└── meta.json
+└── meta.toml
 ```
 
-`main.sh` — parameters arrive as plain arguments, in declaration order; defaults from `meta.json` are filled in by the host. The working directory is the tool's own directory unless `inherit_cwd` is set to `true`.
+`main.sh` — parameters arrive as plain arguments, in declaration order; defaults from `meta.toml` are filled in by the host. The working directory is the tool's own directory unless `inherit_cwd` is set to `true`.
 
 ```sh
 #!/bin/sh
 wc "$1"
 ```
 
-`meta.json` — name, description and the parameter list the model sees:
+`meta.toml` — name, description and the parameter list the model sees:
 
-```json
-{
-  "name": "WordCount",
-  "description": "Count lines, words and bytes of a file",
-  "parameters": ["file: string"],
-  "exec": "main.sh"
-}
+```toml
+name = "WordCount"
+description = "Count lines, words and bytes of a file"
+parameters = ["file: string"]
+exec = "main.sh"
 ```
 
 ```sh

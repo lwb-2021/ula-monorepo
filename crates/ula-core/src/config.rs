@@ -51,7 +51,7 @@ mod test {
 
     #[test]
     fn config_deserialize() {
-        let example = include_str!("../example-config.yaml");
-        let _config: Config = noyalib::from_str_borrowing(example).unwrap();
+        let example = include_str!("../example-config.toml");
+        let _config: Config = toml::from_str(example).unwrap();
     }
 }

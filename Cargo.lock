@@ -1197,8 +1197,6 @@ checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
- "serde",
- "serde_core",
 ]
 
 [[package]]
@@ -1579,41 +1577,6 @@ checksum = "d273983c5a657a70a3e8f2a01329822f3b8c8172b73826411a55751e404a0a4a"
 dependencies = [
  "memchr",
  "minimal-lexical",
-]
-
-[[package]]
-name = "noyalib"
-version = "0.0.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ccc67d13e91577493ff12d930fcdc92a342b46e2299210089d90d2caed837f60"
-dependencies = [
- "indexmap",
- "itoa",
- "memchr",
- "rustc-hash",
- "ryu",
- "serde",
- "serde_ignored",
- "smallvec",
-]
-
-[[package]]
-name = "noyalib"
-version = "0.0.28"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9f075ef19fa3bcf8697c0ef96c37d5c435d339a40ab8081cae3aac3a4e7fee9a"
-dependencies = [
- "hashbrown 0.17.1",
- "indexmap",
- "itoa",
- "libm",
- "memchr",
- "rustc-hash",
- "ryu",
- "serde",
- "serde_core",
- "serde_ignored",
- "smallvec",
 ]
 
 [[package]]
@@ -2313,16 +2276,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_ignored"
-version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
-dependencies = [
- "serde",
- "serde_core",
-]
-
-[[package]]
 name = "serde_json"
 version = "1.0.151"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2884,7 +2837,6 @@ dependencies = [
  "eyre",
  "futures-util",
  "log",
- "noyalib 0.0.28",
  "serde",
  "serde_json",
  "smol",
@@ -2909,7 +2861,6 @@ dependencies = [
  "eyre",
  "isahc",
  "log",
- "noyalib 0.0.18",
  "once_cell",
  "parking_lot",
  "rpds",
@@ -2918,6 +2869,7 @@ dependencies = [
  "smol",
  "tap",
  "thiserror 2.0.21",
+ "toml",
  "ula-protocol",
 ]
 
@@ -2939,6 +2891,8 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
+ "toml",
  "ula-protocol",
 ]
 

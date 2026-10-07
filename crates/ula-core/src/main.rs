@@ -6,7 +6,7 @@ mod config;
 mod main_loop;
 
 use std::{
-    fs::File,
+    fs,
     sync::{Arc, LazyLock},
 };
 
@@ -14,6 +14,7 @@ use std::{
 use std::path::PathBuf;
 
 use arc_swap::ArcSwap;
+use eyre::WrapErr;
 use log::info;
 
 #[cfg(debug_assertions)]
@@ -36,16 +37,18 @@ async fn main_inner() -> eyre::Result<()> {
 
     let config_home = dirs::config_dir().unwrap_or_default().join("ula");
     #[allow(unused)]
-    let config_file = config_home.join("config.yaml");
+    let config_file = config_home.join("config.toml");
 
     #[cfg(debug_assertions)]
-    let config_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("example-config.yaml");
+    let config_file = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("example-config.toml");
 
     info!("Using config {}", config_file.display());
 
-    match File::open(&config_file) {
-        Ok(reader) => {
-            CONFIG.store(Arc::new(noyalib::from_reader(reader)?));
+    match fs::read_to_string(&config_file) {
+        Ok(text) => {
+            let config = toml::from_str(&text)
+                .wrap_err_with(|| format!("unable to parse config {}", config_file.display()))?;
+            CONFIG.store(Arc::new(config));
         }
         Err(err) => {
             #[cfg(not(debug_assertions))]

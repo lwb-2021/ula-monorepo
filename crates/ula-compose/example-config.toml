@@ -1,0 +1,8 @@
+interface = "ula-tui"
+
+plugins = ["ula-ptc"] # lookup: XDG data dirs -> builtin -> github install
+
+[[agents]]
+name = "Main"
+model = "openrouter:nvidia/nemotron-3-ultra-550b-a55b:free"
+default = true

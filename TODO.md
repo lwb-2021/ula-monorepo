@@ -32,7 +32,7 @@
 
 - [ ] 错误栈收敛为 thiserror + eyre 两套：compose 的 snafu → thiserror、ptc 手写 `Error{Lua}` → thiserror、全仓 anyhow → eyre（当前 core/compose/tui/ptc 四套并存）
 - [ ] compose 日志文件挪到与 UDS 同一 run 目录（消掉硬编码 `/tmp/ula.log`）；tui 保持不写 stderr
-- [ ] compose 配置从 YAML 迁 TOML（`noyalib` → toml 解析器；core 配置暂不动）
+- [x] 配置格式统一为 TOML（`noyalib` → `toml`），compose 与 core 配置均迁到 `config.toml`
 - [ ] Usage：请求加 `stream_options.include_usage` 并统计；现状 `ModelResponse::Usage` 只 `warn!("TODO: usage")`，**字符估算方案已否决**，计数只认真实 usage
 - [ ] `finish_reason` 字段从未读取，`ModelResponse::End` 只 `warn!("TODO: end")`
 - [ ] `Session::save` 是桩（`warn + Ok`），持久化格式未定（依赖窗口表结构先定）
