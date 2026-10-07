@@ -1,23 +1,24 @@
-use std::fmt;
+use thiserror::Error;
 
-#[derive(Debug)]
-pub enum Error {
+#[derive(Debug, Error)]
+pub enum PTCError {
+    #[error("{msg}")]
     Lua { msg: String },
+
+    #[error("Internal state error:{msg}")]
+    Internal { msg: String },
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Error::Lua { msg } => write!(f, "Lua: {msg}"),
+impl PTCError {
+    pub fn raise<T>(self) -> Result<T, PTCError> {
+        Err(self)
+    }
+}
+
+impl From<mlua::Error> for PTCError {
+    fn from(value: mlua::Error) -> Self {
+        Self::Lua {
+            msg: value.to_string(),
         }
     }
 }
-
-impl From<mlua::Error> for Error {
-    fn from(e: mlua::Error) -> Self {
-        Error::Lua { msg: e.to_string() }
-    }
-}
-
-impl std::error::Error for Error {}
-

@@ -1,3 +1,7 @@
+mod utils;
+
+pub use utils::build_lua;
+
 use std::{
     collections::HashMap,
     fs::{self, Permissions},
@@ -36,36 +40,6 @@ pub struct Tool {
     meta: ToolMeta,
 }
 
-pub fn list_tools() -> anyhow::Result<Vec<Tool>> {
-    install_builtin_tools().context("When installing builtin tools")?;
-    fs::read_dir(ULA_TOOLS_ROOT.as_path())
-        .context("Failed to read $HOME/.agents/tools")?
-        .filter_map(|r| {
-            r.context("When loading tools")
-                .and_then(|entry| {
-                    entry
-                        .file_type()?
-                        .is_dir()
-                        .then(|| {
-                            fs::read_to_string(entry.path().join("meta.toml"))
-                                .with_context(|| {
-                                    format!("Failed to load metadata of {}", entry.path().display())
-                                })
-                                .and_then(|text| {
-                                    Ok(Tool {
-                                        root: entry.path().to_path_buf(),
-                                        meta: toml::from_str(&text)
-                                            .context("Failed to deserialize")?,
-                                    })
-                                })
-                        })
-                        .transpose()
-                })
-                .transpose()
-        })
-        .collect()
-}
-
 pub fn build_prompt(tools: &[Tool]) -> String {
     tools
         .iter()
@@ -81,59 +55,32 @@ pub fn build_prompt(tools: &[Tool]) -> String {
         .join("\n")
 }
 
-pub fn build_lua(tools: &[Tool]) -> String {
-    tools
-        .iter()
-        .map(|tool| {
-            let signature = tool
-                .meta
-                .parameters
-                .iter()
-                .map(|param| {
-                    let decl = param.split('=').next().unwrap_or(param).trim();
-                    match (decl.split_once(':'), param_default(param)) {
-                        (Some((name, ty)), Some(_)) => {
-                            format!("{}: {}?", name.trim(), ty.trim())
-                        }
-                        _ => decl.to_string(),
-                    }
-                })
-                .collect::<Box<[_]>>()
-                .join(", ");
-            let defaults = tool
-                .meta
-                .parameters
-                .iter()
-                .filter_map(|param| {
-                    let name = param_name(param);
-                    Some(format!("\t{name} = {name} or ({})\n", param_default(param)?))
-                })
-                .collect::<String>();
-            let params = tool
-                .meta
-                .parameters
-                .iter()
-                .map(|param| {
-                    let name = param_name(param);
-                    format!("{name} = {name}")
-                })
-                .collect::<Box<[_]>>()
-                .join(", ");
-            format!(
-                "function {name}({signature}): string\n{defaults}\treturn coroutine.yield({{ name = \"{name}\", params = {{ {params} }} }})\nend",
-                name = tool.meta.name
-            )
+pub fn list_tools() -> anyhow::Result<Vec<Tool>> {
+    install_builtin_tools().context("When installing builtin tools")?;
+    fs::read_dir(ULA_TOOLS_ROOT.as_path())
+        .context("Failed to read $HOME/.agents/tools")?
+        .filter_map(|entry| {
+            entry
+                .context("When loading tools")
+                .and_then(try_load_tool)
+                .transpose()
         })
-        .collect::<Box<[_]>>()
-        .join("\n")
+        .collect()
 }
 
-fn param_name(param: &str) -> &str {
-    param.split([':', '=']).next().unwrap_or(param).trim()
-}
+fn try_load_tool(entry: fs::DirEntry) -> anyhow::Result<Option<Tool>> {
+    if !entry.file_type()?.is_dir() {
+        return Ok(None);
+    }
 
-fn param_default(param: &str) -> Option<&str> {
-    param.split_once('=').map(|(_, default)| default.trim())
+    let root = entry.path();
+    let text = fs::read_to_string(root.join("meta.toml"))
+        .with_context(|| format!("Failed to load metadata of {}", root.display()))?;
+
+    Ok(Some(Tool {
+        root,
+        meta: toml::from_str(&text).context("Failed to deserialize")?,
+    }))
 }
 
 impl Tool {
@@ -146,11 +93,11 @@ impl Tool {
             .parameters
             .iter()
             .map(|param| {
-                let name = param_name(param);
+                let name = utils::param_name(param);
                 payload
                     .get(name)
                     .cloned()
-                    .or_else(|| param_default(param).map(str::to_string))
+                    .or_else(|| utils::param_default(param).map(str::to_string))
                     .with_context(|| {
                         format!("Missing parameter `{name}` of tool {}", self.meta.name)
                     })
