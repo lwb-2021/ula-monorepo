@@ -14,10 +14,10 @@ use ula_protocol::plugin::{PluginInput, PluginMeta, PluginOutput, PluginRequestR
 
 use crate::PATH;
 use crate::permission::Ask;
+use crate::plugin::PluginError;
 use crate::utils::{ChildGuard, LineSink, drain_stderr, json_line};
 
 use super::PluginResult;
-use super::errors::{NotFoundSnafu, TimeoutSnafu};
 
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Per line-operation timeout: a plugin that stops talking is a dead plugin.
@@ -44,7 +44,9 @@ impl PluginState {
             .spawn()
         {
             Ok(child) => child,
-            Err(e) if e.kind() == ErrorKind::NotFound => return NotFoundSnafu { name }.fail(),
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                return PluginError::NotFound { name }.raise();
+            }
             Err(e) => return Err(e.into()),
         };
 
@@ -195,6 +197,6 @@ async fn with_timeout<T>(
 
     match outcome {
         Outcome::Done(result) => result,
-        Outcome::TimedOut => TimeoutSnafu.fail(),
+        Outcome::TimedOut => PluginError::Timeout.raise(),
     }
 }
