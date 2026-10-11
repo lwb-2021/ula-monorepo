@@ -229,7 +229,9 @@ async fn fail(
 ) {
     let reason = reason.into();
     warn!("[compose] {reason}");
-    let _ = to_ui.try_send(UIReceive::Error { error: reason.clone() });
+    let _ = to_ui.try_send(UIReceive::Error {
+        error: reason.clone(),
+    });
     let _ = shutdown.send(reason).await;
 }
 
@@ -394,13 +396,16 @@ async fn plugin_worker(
             continue;
         };
 
-        info!("[compose] content ({} bytes) → plugin `{name}`", content.len());
+        info!(
+            "[compose] content ({} bytes) → plugin `{name}`",
+            content.len()
+        );
 
         let reply = match plugin.call(&content, &permission).await {
             Ok(reply) => reply,
             Err(e) => {
                 error!("[plugin] {name}: {e}, restarting");
-                match plugin.restart() {
+                match plugin.restart().await {
                     Ok(restarted) => {
                         plugin = restarted;
                         continue;

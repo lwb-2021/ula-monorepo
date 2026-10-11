@@ -85,10 +85,12 @@ impl PluginState {
         self.call_inner(content, permission).await
     }
 
-    pub fn restart(mut self) -> PluginResult<Self> {
+    pub async fn restart(mut self) -> PluginResult<Self> {
         self.child.kill();
         let Self { name, exec, .. } = self;
-        Self::start(name, exec)
+        let mut fresh = Self::start(name, exec)?;
+        fresh.handshake().await?;
+        Ok(fresh)
     }
 
     async fn handshake_inner(&mut self) -> PluginResult<Option<String>> {
