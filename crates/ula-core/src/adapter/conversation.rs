@@ -22,6 +22,7 @@ pub enum ConversationItem {
 pub struct StandardMessage<'a> {
     pub role: Cow<'a, str>,
     pub content: Cow<'a, str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<Cow<'a, str>>,
 }
 
