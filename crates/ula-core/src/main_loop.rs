@@ -13,7 +13,8 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use ula_protocol::core::UserMessage;
+use ula_protocol::core::EventToCore;
+use ula_protocol::universal::UserInteraction;
 
 pub async fn main_loop(model: String) -> eyre::Result<()> {
     let exit = Arc::new(Notify::new());
@@ -31,18 +32,20 @@ pub async fn main_loop(model: String) -> eyre::Result<()> {
                         .and_then(|s| serde_json::from_str(&s).map_err(Into::into))
                 })
                 .try_for_each(|line| match line? {
-                    UserMessage::Text { text } => {
-                        session.queue_message(text);
-                        Ok(())
-                    }
-                    UserMessage::SystemPrompt { prompt } => {
-                        extend_system_prompt(&prompt);
-                        Ok(())
-                    }
-                    UserMessage::Interrupt => {
-                        session.interrupt();
-                        Ok(())
-                    }
+                    EventToCore::UserInteraction { interaction } => match interaction {
+                        UserInteraction::Text { text } => {
+                            session.queue_message(text);
+                            Ok(())
+                        }
+                        UserInteraction::ExtraSystemPrompt { prompt } => {
+                            extend_system_prompt(&prompt);
+                            Ok(())
+                        }
+                        UserInteraction::Interrupt => {
+                            session.interrupt();
+                            Ok(())
+                        }
+                    },
                 })
                 .await
                 .inspect_err(|_: &anyhow::Error| notify_exit(&exit))

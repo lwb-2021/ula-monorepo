@@ -17,12 +17,14 @@ use std::sync::LazyLock;
 
 use asynchronous_codec::{FramedWrite, LinesCodec};
 use eyre::WrapErr;
-use futures_util::{SinkExt, future::join_all};
+use futures_util::{SinkExt, StreamExt, future::join_all};
 use log::{error, info, warn};
 use smol::io::{AsyncBufReadExt, BufReader};
-use smol::{Async, channel, future, stream::StreamExt};
-use ula_protocol::core::{EventFromCore, UserMessage};
+use smol::net::unix::UnixStream;
+use smol::{Async, channel, future};
+use ula_protocol::core::{EventFromCore, EventToCore};
 use ula_protocol::interface::{UIReceive, UISend};
+use ula_protocol::universal::{MessageEvent, MessageEventType, UserInteraction};
 
 use crate::config::ComposeConfig;
 use crate::core::Core;
@@ -127,8 +129,10 @@ async fn inject_system_prompt(stdin: &mut Async<ChildStdin>, prompt: &str) -> st
         return Ok(());
     }
 
-    let message = UserMessage::SystemPrompt {
-        prompt: prompt.to_owned(),
+    let message = EventToCore::UserInteraction {
+        interaction: UserInteraction::ExtraSystemPrompt {
+            prompt: prompt.to_owned(),
+        },
     };
     let mut sink = FramedWrite::new(stdin, LinesCodec);
     sink.send(json_line(&message)?).await
@@ -142,51 +146,53 @@ async fn routing(core: Core, ui: Interface, plugins: Vec<PluginState>) -> String
         child: _core,
     } = core;
 
-    let (mut events_tx, events_rx) = async_broadcast::broadcast::<EventFromCore<'static>>(64);
-    events_tx.set_overflow(true);
-    events_tx.set_await_active(false);
+    let stream = match ui.accept().await {
+        Ok(stream) => stream,
+        Err(e) => return format!("unable to accept the UI connection: {e}"),
+    };
+    info!("[ui] connected");
+
+    let (events_tx, events_rx) = async_broadcast::broadcast::<EventFromCore>(64);
 
     let (to_ui_tx, to_ui_rx) = channel::bounded::<UIReceive>(1024);
-    let (from_ui_tx, from_ui_rx) = channel::bounded::<UISend>(256);
-    let (to_core_tx, to_core_rx) = channel::bounded::<UserMessage>(256);
+    let (to_core_tx, to_core_rx) = channel::bounded::<EventToCore>(256);
     let (shutdown_tx, shutdown_rx) = channel::bounded::<String>(8);
     let (ask_tx, ask_rx) = channel::bounded::<permission::Ask>(8);
     let (answer_tx, answer_rx) = channel::bounded::<permission::Answer>(8);
 
-    let mut jobs = Vec::new();
-    let mut workers: Vec<Task> = Vec::new();
-    for plugin in plugins {
-        let (job_tx, job_rx) = channel::bounded::<String>(64);
-        jobs.push(job_tx);
-        workers.push(Box::pin(plugin_worker(
-            plugin,
-            job_rx,
-            to_core_tx.clone(),
-            ask_tx.clone(),
-        )));
-    }
+    let workers: Vec<_> = plugins
+        .into_iter()
+        .map(|plugin| {
+            Box::pin(plugin_worker(
+                events_rx.clone(),
+                plugin,
+                to_core_tx.clone(),
+                ask_tx.clone(),
+            )) as Task
+        })
+        .collect();
 
     let mut tasks: Vec<Task> = vec![
-        Box::pin(core_reader(
+        Box::pin(core_link(
             stdout,
             events_tx,
             to_ui_tx.clone(),
             shutdown_tx.clone(),
         )),
-        Box::pin(ui_link(ui, to_ui_rx, from_ui_tx, shutdown_tx.clone())),
-        Box::pin(dispatch(
+        Box::pin(event_dispatch(
             events_rx,
-            jobs,
             to_ui_tx.clone(),
             shutdown_tx.clone(),
         )),
-        Box::pin(ui_messages(
-            from_ui_rx,
+        Box::pin(ui_input(
+            stream.clone(),
             to_core_tx.clone(),
             answer_tx.clone(),
+            shutdown_tx.clone(),
         )),
+        Box::pin(ui_output(to_ui_rx, stream, shutdown_tx.clone())),
         Box::pin(permission::prompter(ask_rx, answer_rx, to_ui_tx.clone())),
-        Box::pin(core_writer(
+        Box::pin(core_output(
             to_core_rx,
             FramedWrite::new(stdin, LinesCodec),
             to_ui_tx.clone(),
@@ -216,7 +222,6 @@ async fn routing(core: Core, ui: Interface, plugins: Vec<PluginState>) -> String
     .await
 }
 
-/// Logs a fatal routing problem, shows it in the UI when the UI is still there, and wakes `routing`.
 async fn fail(
     shutdown: &channel::Sender<String>,
     to_ui: &channel::Sender<UIReceive>,
@@ -224,208 +229,141 @@ async fn fail(
 ) {
     let reason = reason.into();
     warn!("[compose] {reason}");
-    let _ = to_ui.try_send(UIReceive::Error {
-        message: reason.clone(),
-    });
+    let _ = to_ui.try_send(UIReceive::Error { error: reason.clone() });
     let _ = shutdown.send(reason).await;
 }
 
-async fn core_reader(
+async fn core_link(
     stdout: Async<ChildStdout>,
-    events: async_broadcast::Sender<EventFromCore<'static>>,
+    events: async_broadcast::Sender<EventFromCore>,
     to_ui: channel::Sender<UIReceive>,
     shutdown: channel::Sender<String>,
 ) {
-    let mut lines = BufReader::new(stdout).lines();
-
-    while let Some(line) = lines.next().await {
-        let line = match line {
-            Ok(line) => line,
-            Err(e) => {
-                fail(
-                    &shutdown,
-                    &to_ui,
-                    format!("ula-core stdout became unreadable: {e}"),
-                )
-                .await;
-                return;
+    BufReader::new(stdout)
+        .lines()
+        .take_while(|line| {
+            if let Err(e) = line {
+                warn!("[core] ula-core stdout became unreadable: {e}");
             }
-        };
-
-        let event = match serde_json::from_str::<EventFromCore>(&line) {
-            Ok(event) => event.into_owned(),
-            Err(e) => {
-                warn!("[core] ignoring malformed event: {e}");
-                continue;
+            std::future::ready(line.is_ok())
+        })
+        .filter_map(|line| async move {
+            let line = line.ok()?;
+            match serde_json::from_str::<EventFromCore>(&line) {
+                Ok(event) => Some(event),
+                Err(e) => {
+                    warn!("[core] ignoring malformed event: {e}");
+                    None
+                }
             }
-        };
-
-        if events.broadcast(event).await.is_err() {
-            return;
-        }
-    }
+        })
+        .for_each(|event| async {
+            let _ = events.broadcast(event).await;
+        })
+        .await;
 
     events.close();
     fail(&shutdown, &to_ui, "ula-core exited").await;
 }
 
-async fn dispatch(
-    mut events: async_broadcast::Receiver<EventFromCore<'static>>,
-    jobs: Vec<channel::Sender<String>>,
+async fn event_dispatch(
+    events: async_broadcast::Receiver<EventFromCore>,
     to_ui: channel::Sender<UIReceive>,
     shutdown: channel::Sender<String>,
 ) {
-    loop {
-        let event = match events.recv().await {
-            Ok(event) => event,
-            Err(async_broadcast::RecvError::Overflowed(skipped)) => {
-                warn!("[compose] UI stalled, dropped {skipped} core event(s)");
-                continue;
-            }
-            Err(async_broadcast::RecvError::Closed) => return,
-        };
-
-        match event {
-            EventFromCore::Streaming(msg) => {
-                let reasoning = msg.reasoning.map(|reasoning| reasoning.into_owned());
-                let content = (!msg.content.is_empty()).then(|| msg.content.into_owned());
-                let _ = to_ui.try_send(UIReceive::Stream { reasoning, content });
-            }
-            EventFromCore::Content(msg) => {
-                let reasoning = msg.reasoning.map(|reasoning| reasoning.into_owned());
-                let content = msg.content.into_owned();
-
-                let forwarded = to_ui.try_send(UIReceive::Content {
-                    reasoning,
-                    content: content.clone(),
-                });
-                if forwarded.is_err() {
-                    fail(&shutdown, &to_ui, "UI stopped consuming messages").await;
-                    return;
+    events
+        .for_each(|event| async {
+            let message = match event {
+                EventFromCore::Message { message } => UIReceive::Message { message },
+                EventFromCore::Error { error_msg } => {
+                    warn!("[compose] core error: {error_msg}");
+                    UIReceive::Error { error: error_msg }
                 }
+            };
 
-                info!("[compose] content ({} bytes) → plugin", content.len());
-
-                if jobs.is_empty() {
-                    warn!("[compose] no plugin is listening for tool calls");
-                    continue;
-                }
-
-                for job in &jobs {
-                    if job.send(content.clone()).await.is_err() {
-                        error!("[compose] a plugin disappeared, dropping its reply");
-                    }
-                }
+            if to_ui.send(message).await.is_err() {
+                fail(&shutdown, &to_ui, "UI stopped consuming messages").await;
             }
-            EventFromCore::Error { message } => {
-                warn!("[compose] core error: {message}");
-                let _ = to_ui.try_send(UIReceive::Error {
-                    message: message.into_owned(),
-                });
-            }
-            // Reserved for session resume / context management, see `EventFromCore`.
-            EventFromCore::FullConversation(_) => {}
-        }
-    }
+        })
+        .await;
 }
 
-async fn ui_link(
-    ui: Interface,
-    to_ui_rx: channel::Receiver<UIReceive>,
-    from_ui_tx: channel::Sender<UISend>,
+async fn ui_input(
+    stream: UnixStream,
+    to_core: channel::Sender<EventToCore>,
+    answers: channel::Sender<permission::Answer>,
     shutdown: channel::Sender<String>,
 ) {
-    let stream = match ui.accept().await {
-        Ok(stream) => stream,
-        Err(e) => {
-            let _ = shutdown
-                .send(format!("unable to accept the UI connection: {e}"))
-                .await;
-            return;
-        }
-    };
-    info!("[ui] connected");
-
-    let reader = {
-        let mut lines = BufReader::new(stream.clone()).lines();
-        let from_ui_tx = from_ui_tx;
-        let shutdown = shutdown.clone();
-        async move {
-            while let Some(line) = lines.next().await {
-                match line {
-                    Ok(line) => match serde_json::from_str::<UISend>(&line) {
-                        Ok(message) => {
-                            if from_ui_tx.send(message).await.is_err() {
-                                return;
-                            }
-                        }
-                        Err(e) => warn!("[ui] ignoring malformed message: {e}"),
-                    },
-                    Err(e) => warn!("[ui] read failed: {e}"),
+    BufReader::new(stream)
+        .lines()
+        .filter_map(|line| async move {
+            match line {
+                Ok(line) => match serde_json::from_str::<UISend>(&line) {
+                    Ok(message) => Some(message),
+                    Err(e) => {
+                        warn!("[ui] ignoring malformed message: {e}");
+                        None
+                    }
+                },
+                Err(e) => {
+                    warn!("[ui] read failed: {e}");
+                    None
                 }
             }
-
-            info!("[ui] disconnected");
-            let _ = shutdown.send(String::from("UI disconnected")).await;
-        }
-    };
-
-    let writer = {
-        let mut sink = FramedWrite::new(stream, LinesCodec);
-        let mut lines = Box::pin(to_ui_rx.map(|message| json_line(&message)));
-        async move {
-            if let Err(e) = sink.send_all(&mut lines).await {
-                let _ = shutdown
-                    .send(format!("unable to write to the UI: {e}"))
-                    .await;
-            }
-        }
-    };
-
-    future::zip(reader, writer).await;
-}
-
-async fn ui_messages(
-    from_ui: channel::Receiver<UISend>,
-    to_core: channel::Sender<UserMessage>,
-    answers: channel::Sender<permission::Answer>,
-) {
-    while let Ok(message) = from_ui.recv().await {
-        let message = match message {
-            UISend::UserMessage { text } => UserMessage::Text { text },
-            UISend::Interrupt => UserMessage::Interrupt,
-            UISend::RequestResult {
-                request_id,
-                allow,
-                reason,
-            } => {
-                let answer = permission::Answer {
+        })
+        .for_each(|message| async {
+            match message {
+                UISend::UserInteraction { interaction } => {
+                    let _ = to_core
+                        .send(EventToCore::UserInteraction { interaction })
+                        .await;
+                }
+                UISend::RequestResult {
                     request_id,
                     allow,
                     reason,
-                };
-                if answers.send(answer).await.is_err() {
-                    return;
+                } => {
+                    let _ = answers
+                        .send(permission::Answer {
+                            request_id,
+                            allow,
+                            reason,
+                        })
+                        .await;
                 }
-                continue;
             }
-        };
+        })
+        .await;
 
-        if to_core.send(message).await.is_err() {
-            return;
-        }
+    info!("[ui] disconnected");
+    let _ = shutdown.send(String::from("UI disconnected")).await;
+}
+
+async fn ui_output(
+    to_ui: channel::Receiver<UIReceive>,
+    stream: UnixStream,
+    shutdown: channel::Sender<String>,
+) {
+    let sink = FramedWrite::new(stream, LinesCodec);
+    let result = to_ui.map(|message| json_line(&message)).forward(sink).await;
+    if let Err(e) = result {
+        let _ = shutdown
+            .send(format!("unable to write to the UI: {e}"))
+            .await;
     }
 }
 
-async fn core_writer(
-    to_core: channel::Receiver<UserMessage>,
-    mut sink: LineSink<Async<ChildStdin>>,
+async fn core_output(
+    to_core: channel::Receiver<EventToCore>,
+    sink: LineSink<Async<ChildStdin>>,
     to_ui: channel::Sender<UIReceive>,
     shutdown: channel::Sender<String>,
 ) {
-    let mut lines = Box::pin(to_core.map(|message| json_line(&message)));
-
-    if let Err(e) = sink.send_all(&mut lines).await {
+    let result = to_core
+        .map(|message| json_line(&message))
+        .forward(sink)
+        .await;
+    if let Err(e) = result {
         fail(
             &shutdown,
             &to_ui,
@@ -436,14 +374,28 @@ async fn core_writer(
 }
 
 async fn plugin_worker(
+    mut events: async_broadcast::Receiver<EventFromCore>,
     mut plugin: PluginState,
-    jobs: channel::Receiver<String>,
-    to_core: channel::Sender<UserMessage>,
+    to_core: channel::Sender<EventToCore>,
     permission: channel::Sender<permission::Ask>,
 ) {
     let name = plugin.name().to_owned();
 
-    while let Ok(content) = jobs.recv().await {
+    while let Some(event) = events.next().await {
+        let EventFromCore::Message {
+            message:
+                MessageEvent {
+                    content,
+                    message_type: MessageEventType::Content,
+                    ..
+                },
+        } = event
+        else {
+            continue;
+        };
+
+        info!("[compose] content ({} bytes) → plugin `{name}`", content.len());
+
         let reply = match plugin.call(&content, &permission).await {
             Ok(reply) => reply,
             Err(e) => {
@@ -469,7 +421,9 @@ async fn plugin_worker(
         info!("[plugin] {name}: {} bytes → core", message.len());
 
         if to_core
-            .send(UserMessage::Text { text: message })
+            .send(EventToCore::UserInteraction {
+                interaction: UserInteraction::Text { text: message },
+            })
             .await
             .is_err()
         {

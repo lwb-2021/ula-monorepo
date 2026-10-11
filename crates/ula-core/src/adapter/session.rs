@@ -16,7 +16,8 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use smol::stream::StreamExt;
 use tap::{Tap, TapOptional};
-use ula_protocol::core::{EventFromCore, Message};
+use ula_protocol::core::EventFromCore;
+use ula_protocol::universal::{MessageEvent, MessageEventType};
 
 use crate::{
     adapter::{
@@ -123,10 +124,13 @@ impl Session {
         }
         .try_fold(Accum::default(), |prev: Accum, event| match event {
             ModelResponse::Delta { reasoning, content } => {
-                write_event(&EventFromCore::Streaming(Message {
-                    reasoning: reasoning.as_ref().map(Into::into),
-                    content: (&content).into(),
-                }));
+                write_event(&EventFromCore::Message {
+                    message: MessageEvent {
+                        reasoning: reasoning.clone(),
+                        content: content.clone(),
+                        message_type: MessageEventType::Streaming,
+                    },
+                });
                 Ok(Accum {
                     reasoning: prev
                         .reasoning
@@ -152,10 +156,13 @@ impl Session {
             Err(error) => return self.abort(error).await,
         };
 
-        write_event(&EventFromCore::Content(Message {
-            reasoning: assistant_response.reasoning.as_ref().map(Into::into),
-            content: (&assistant_response.content).into(),
-        }));
+        write_event(&EventFromCore::Message {
+            message: MessageEvent {
+                reasoning: assistant_response.reasoning.clone(),
+                content: assistant_response.content.clone(),
+                message_type: MessageEventType::Content,
+            },
+        });
 
         let message = ConversationItem::Assistant {
             reasoning: assistant_response.reasoning,
@@ -188,7 +195,9 @@ impl Session {
     async fn abort(&self, error: APIError) -> Result<(), APIError> {
         warn!("poll aborted: {error}");
         self.state.provider_instance.store(None);
-        write_event(&EventFromCore::Error { message: error.to_string().into() });
+        write_event(&EventFromCore::Error {
+            error_msg: error.to_string(),
+        });
         self.state.notify.notified().await;
         Ok(())
     }

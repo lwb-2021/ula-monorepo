@@ -24,7 +24,7 @@
 
 | 模块 | 职责 |
 |------|------|
-| **ula-core** | 负责 LLM 对话。输入用户消息，输出 `EventFromCore`（Streaming/Content/Error）。不处理 UI，不处理 Plugin。 |
+| **ula-core** | 负责 LLM 对话。输入用户消息，输出 `EventFromCore`（Message/Error，`MessageEvent.message_type` 区分 streaming/content）。不处理 UI，不处理 Plugin。 |
 | **ula-ptc** | 负责工具调用等流程。接收 Core 的 Content，自行解析 `ula-ptc` 代码块，在 Luau 运行时中执行，通过 `coroutine.yield` 发起工具调用，输出 `PluginOutput`。 |
 | **ula-compose** | 负责传输信息。路由 Core 输出到 Plugin，把 Plugin 输出发回给 Core；启动时先收插件开机首帧聚合提示词；串行化权限提示。 |
 | **ula-tui** | 负责显示和发送用户消息。通过 UDS 与 Compose 通信，权限请求弹 modal。 |
@@ -60,7 +60,7 @@
 ```
 启动：Compose 读配置 → 解析并拉起插件（任一失败即显式报错退出）→ 拉起 Core → 收插件开机首帧聚合提示词 → 拉起 UI
   Plugin ──首帧 PluginMeta{system_prompt}──► Compose（插件自推，无请求）
-  Compose ──UserMessage::SystemPrompt──► Core
+  Compose ──EventToCore::UserInteraction{ExtraSystemPrompt}──► Core
 
 对话：
 用户输入 → UI ──UDS──► Compose
@@ -74,12 +74,14 @@
                               ▼
                        Core 输出 EventFromCore
                               │
-                    ┌─────────┼─────────┬──────────────┐
-                    ▼         ▼         ▼              ▼
-              Streaming    Content     Error      FullConversation
-              (UDS → UI)  (整轮原文   (UDS → UI；  (预留：session 恢复/
-                           → Plugin)   core 挂起    上下文管理，暂不消费)
-                                        等下一条消息)
+                    ┌─────────┼─────────┐
+                    ▼         ▼         ▼
+                 Message     Error   （message_type 携带
+              (streaming:   (UDS → UI；  FullConversation 预留
+               UDS → UI；    core 挂起    给 session 恢复/
+               content:     等下一条消息)  上下文管理）
+               整轮原文
+               → Plugin 广播)
                                         │
                                         ▼
                                  ┌──────────────┐
@@ -88,7 +90,7 @@
                                  └──────┬───────┘
                                         │
                                         ▼
-                     SendMessage{result} ──► UserMessage::Text 回灌 Core
+                     SendMessage{result} ──► EventToCore 回灌 Core
                      Idle                  ──► 丢弃（不回灌，避免死循环）
                      Request{…}            ──► 权限提示，见下
 
@@ -106,25 +108,27 @@
 | 连接 | 方式 | 协议 |
 |------|------|------|
 | Core → Compose | pipe | `EventFromCore` (JSON) |
-| Compose → Core | pipe | `UserMessage` (JSON) |
+| Compose → Core | pipe | `EventToCore` (JSON) |
 | Compose ↔ Plugin | pipe | `PluginMeta`（开机首帧）/ `PluginInput` / `PluginOutput` (JSON) |
 | UI ↔ Compose | UDS | `UISend` / `UIReceive` (JSON) |
 
 ### 协议类型 (ula-protocol)
 
-- `EventFromCore`: Streaming / Content / Error / FullConversation（预留）
-- `UserMessage`: Text / SystemPrompt / Interrupt
+- `EventFromCore`: Message{message} / Error{error_msg}
+- `EventToCore`: UserInteraction{interaction}
+- `MessageEvent` / `MessageEventType`: 消息载荷，`message_type` 为 streaming / content / full_conversation（后者预留）
+- `UserInteraction`: Text / ExtraSystemPrompt / Interrupt（`UISend`、`EventToCore` 的共享载荷）
 - `PluginInput`: Message（首帧之后的下行）
 - `PluginOutput`: SendMessage / Idle / Request（首帧不上行，`PluginMeta` 独立于流外）
 - `PluginMeta`: 开机首帧，携带 `system_prompt: Option<String>`，插件自推
 - `PluginCapability`: 能力枚举（`ContextManager`），manifest `provides` 的注册键
 - `PluginRequestResponse`: Allowed / Rejected{reason} / Interrupt
-- `UISend`: UserMessage / RequestResult / Interrupt
-- `UIReceive`: Stream / Content / Error / Request
+- `UISend`: UserInteraction / RequestResult
+- `UIReceive`: Message{message} / Error{error} / Request
 
 协议变体是封闭枚举，新增变体 = 所有进程必须同步升级（plugin 侧解析失败即退出）。加变体前想清楚广播面：定向能力路由优于广播。
 
-**Wire 约定**：所有协议枚举统一内部标签 `#[serde(tag = "type", rename_all = "snake_case")]`，wire 形如 `{"type":"text","text":"..."}`；struct 变体优先，newtype 变体内必须是 struct（serde 对「内部标签 + 字符串 newtype」在运行期直接报错）。派生统一 `Debug, Clone, PartialEq, Eq, Serialize, Deserialize`。
+**Wire 约定**：所有协议枚举统一 serde 默认外部标签 + `#[serde(rename_all = "snake_case")]`，wire 形如 `{"message":{...}}`、`{"text":"..."}`（作为字段嵌套复用的载荷枚举 `UserInteraction` 同样适用）；struct 变体优先，newtype 变体内必须是 struct。派生统一 `Debug, Clone, PartialEq, Eq, Serialize, Deserialize`。
 
 ## 上下文管理（设计定稿，未实现）
 
@@ -135,7 +139,7 @@
 5. **窗口数据结构**：`Conversation` 基于 rpds 持久化结构，fork = O(1) Arc clone；Session 从单 conversation 演进为「活动窗口 + 存档窗口表」，同一时刻只有一个活动窗口。
 6. **系统提示词铁律**：`ConversationItem::System` 是占位符，构建请求时物化 `SYSTEM_PROMPT` 单例——新窗口自动携带当前提示词，协议载荷不带系统提示词。`SYSTEM_PROMPT` 只在启动握手时聚合一次、之后 append-only（`rcu` 追加），**fork 永不重新聚合、永不重新握手**，否则提示词翻倍。
 7. **摘要策略**：head 做摘要、tail 保原文（最近若干轮原样保留，模型刚看过、细节最活）；system prompt 与硬规则每窗口重新注入，不进摘要。压缩量过大时分块 map-reduce，循环由 plugin 编排（plugin 的协程状态机天然适合多轮循环），core 只提供 Fork 与刹车。
-8. **压缩轮是内部轮**：不以普通聊天形态渲染进 UI（需要事件标记或复用 FullConversation 语义）。
+8. **压缩轮是内部轮**：不以普通聊天形态渲染进 UI（复用 `MessageEventType::FullConversation` 语义标记）。
 9. **无能力 plugin = 纯卡**：core 刹车后没人回 Fork 就一直等。用户不装上下文管理，假定他不想要（不做降级截断兜底）。
 10. **计数**：以真实 `Usage`（`stream_options.include_usage`）为准。字符估算已否决——对中文对话低估约 4 倍，刹车永远不会触发。Usage 落地前不实现计数，只留 `warn!("TODO: usage")` 占位。
 
@@ -143,7 +147,7 @@
 
 - **单一工具通道，封闭能力原语面**：不新增 edit 等任务专用工具。模型自由度来自封闭能力原语的开放组合。
 - **伪标签协议** ```ula-ptc：模型训练集里不存在的标签，只能照着 `prompt.md` 示例逐字模仿。解析在 Plugin 内做，Core/Compose 都不理解标签。
-- **插件提示词注入**：Plugin 开机自推首帧 `PluginMeta{system_prompt}`（可为 `None`），Compose 聚合后经 `UserMessage::SystemPrompt` 注入 `SYSTEM_PROMPT`（`ArcSwap`）。Core 自身的 `system-prompt.md` 只写通用规则，不写工具调用文档。注入只在启动时发生一次。
+- **插件提示词注入**：Plugin 开机自推首帧 `PluginMeta{system_prompt}`（可为 `None`），Compose 聚合后经 `EventToCore::UserInteraction{ExtraSystemPrompt}` 注入 `SYSTEM_PROMPT`（`ArcSwap`）。Core 自身的 `system-prompt.md` 只写通用规则，不写工具调用文档。注入只在启动时发生一次。
 - **不宣传未实现能力**：提示词与文档只写已实现的功能。
 - **请求错误不杀进程**：API 错误就地处理——丢弃 provider、发 `EventFromCore::Error` 到 UI、挂起等用户下一条消息；只有真·致命才让 core 退出。
 - **错误栈两套封顶**：`thiserror` 写域错误枚举（结构化字段，含 compose 的 plugin 模块），`eyre` 写边界与顶层；不再引入 anyhow/snafu。

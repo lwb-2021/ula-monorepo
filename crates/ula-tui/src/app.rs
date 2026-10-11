@@ -1,6 +1,7 @@
 use crossterm::event::{Event, KeyEvent};
 use tui_input::backend::crossterm::to_input_request;
 use ula_protocol::interface::{UIReceive, UISend};
+use ula_protocol::universal::{MessageEventType, UserInteraction};
 
 use crate::modal::{Modal, ModalAction};
 
@@ -77,27 +78,27 @@ pub struct App {
 impl App {
     pub fn on_ui(&mut self, event: UIReceive) -> Vec<Effect> {
         match event {
-            UIReceive::Stream { reasoning, content } => {
-                if let Some(reasoning) = reasoning {
-                    self.live.reasoning.push_str(&reasoning);
+            UIReceive::Message { message } => match message.message_type {
+                MessageEventType::Streaming => {
+                    self.live.reasoning.push_str(&message.reasoning.unwrap_or_default());
+                    self.live.content.push_str(&message.content);
+                    self.busy = true;
+                    vec![]
                 }
-                if let Some(content) = content {
-                    self.live.content.push_str(&content);
+                MessageEventType::Content => {
+                    self.busy = false;
+                    self.live.clear();
+                    vec![Effect::Flush(Turn::Assistant {
+                        reasoning: message.reasoning.filter(|text| !text.is_empty()),
+                        content: message.content,
+                    })]
                 }
-                self.busy = true;
-                vec![]
-            }
-            UIReceive::Content { reasoning, content } => {
+                // Reserved for session resume; no UI representation yet.
+                MessageEventType::FullConversation => vec![],
+            },
+            UIReceive::Error { error } => {
                 self.busy = false;
-                self.live.clear();
-                vec![Effect::Flush(Turn::Assistant {
-                    reasoning: reasoning.filter(|text| !text.is_empty()),
-                    content,
-                })]
-            }
-            UIReceive::Error { message } => {
-                self.busy = false;
-                self.error = Some(message);
+                self.error = Some(error);
                 vec![]
             }
             UIReceive::Request {
@@ -123,7 +124,9 @@ impl App {
                 vec![]
             }
             Action::Submit => self.submit(),
-            Action::Interrupt => vec![Effect::Send(UISend::Interrupt)],
+            Action::Interrupt => vec![Effect::Send(UISend::UserInteraction {
+                interaction: UserInteraction::Interrupt,
+            })],
             Action::ScrollUp => {
                 self.scroll.follow = false;
                 self.scroll.offset = self.scroll.offset.saturating_sub(page);
@@ -154,7 +157,9 @@ impl App {
         self.scroll = Scroll::default();
         vec![
             Effect::Flush(Turn::User(text.clone())),
-            Effect::Send(UISend::UserMessage { text }),
+            Effect::Send(UISend::UserInteraction {
+                interaction: UserInteraction::Text { text },
+            }),
         ]
     }
 
@@ -182,11 +187,32 @@ impl App {
 mod tests {
     use crossterm::event::{KeyCode, KeyModifiers};
     use ula_protocol::interface::UIReceive;
+    use ula_protocol::universal::{MessageEvent, MessageEventType};
 
     use super::*;
 
     fn edit(code: KeyCode) -> Action {
         Action::Edit(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn stream(reasoning: Option<&str>, content: &str) -> UIReceive {
+        UIReceive::Message {
+            message: MessageEvent {
+                reasoning: reasoning.map(Into::into),
+                content: content.into(),
+                message_type: MessageEventType::Streaming,
+            },
+        }
+    }
+
+    fn turn(reasoning: Option<&str>, content: &str) -> UIReceive {
+        UIReceive::Message {
+            message: MessageEvent {
+                reasoning: reasoning.map(Into::into),
+                content: content.into(),
+                message_type: MessageEventType::Content,
+            },
+        }
     }
 
     fn type_text(app: &mut App, text: &str) {
@@ -198,14 +224,8 @@ mod tests {
     #[test]
     fn stream_appends_deltas() {
         let mut app = App::default();
-        app.on_ui(UIReceive::Stream {
-            reasoning: Some("think".into()),
-            content: Some("hel".into()),
-        });
-        app.on_ui(UIReceive::Stream {
-            reasoning: None,
-            content: Some("lo".into()),
-        });
+        app.on_ui(stream(Some("think"), "hel"));
+        app.on_ui(stream(None, "lo"));
         assert_eq!(app.live.reasoning, "think");
         assert_eq!(app.live.content, "hello");
         assert!(app.busy);
@@ -214,14 +234,8 @@ mod tests {
     #[test]
     fn content_flushes_the_turn() {
         let mut app = App::default();
-        app.on_ui(UIReceive::Stream {
-            reasoning: None,
-            content: Some("hi".into()),
-        });
-        let effects = app.on_ui(UIReceive::Content {
-            reasoning: None,
-            content: "hi".into(),
-        });
+        app.on_ui(stream(None, "hi"));
+        let effects = app.on_ui(turn(None, "hi"));
         assert!(app.live.content.is_empty());
         assert!(!app.busy);
         assert!(matches!(
@@ -239,7 +253,7 @@ mod tests {
         assert!(app.busy);
         assert!(matches!(
             effects.as_slice(),
-            [Effect::Flush(Turn::User(text)), Effect::Send(UISend::UserMessage { text: sent })]
+            [Effect::Flush(Turn::User(text)), Effect::Send(UISend::UserInteraction { interaction: UserInteraction::Text { text: sent } })]
                 if text == "yo" && sent == "yo"
         ));
     }
