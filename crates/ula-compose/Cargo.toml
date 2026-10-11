@@ -20,7 +20,7 @@ env_logger = { version = "0.11.11", default-features = false, features = [
     "auto-color",
     "humantime",
 ] }
-eyre = { version = "0.6.14", default-features = false }
+eyre = "0.6.14"
 xdg = "3.0.0"
 toml = "1.1.6"
 thiserror = "2.0.21"

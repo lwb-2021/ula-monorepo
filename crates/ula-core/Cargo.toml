@@ -16,7 +16,7 @@ env_logger = { version = "0.11.11", default-features = false, features = [
     "auto-color",
     "humantime",
 ] }
-eyre = { version = "0.6.14", default-features = false }
+eyre = "0.6.14"
 isahc = { version = "2.0.1", default-features = false, features = [
     "http2",
     "native-tls",
