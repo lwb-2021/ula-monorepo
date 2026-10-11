@@ -1,0 +1,13 @@
+[package]
+name = "ula-cli"
+version = "0.1.0"
+edition = "2024"
+default-run = "ula"
+
+[[bin]]
+name = "ula"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.6.7", default-features = false, features = ["cargo", "color", "derive", "env", "help", "std", "usage"] }
+xdg = "3.0.0"

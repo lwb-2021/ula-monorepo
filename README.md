@@ -13,7 +13,7 @@ ula is a **light and extensive** universal agent.
 ## Installing
 
 ```sh
-cargo install --git https://github.com/lwb-2021/ula-monorepo --locked ula-compose ula-core ula-ptc ula-tui
+cargo install --git https://github.com/lwb-2021/ula-monorepo --locked ula-cli ula-compose ula-core ula-ptc ula-tui
 ```
 
 or with Nix:
@@ -22,7 +22,17 @@ or with Nix:
 nix profile add github:lwb-2021/ula-monorepo
 ```
 
-Configuration is still manual — copy `crates/ula-compose/example-config.toml` and `crates/ula-core/example-config.toml`, then fill them in. A friendlier way to run it is under development.
+## Running
+
+`ula` is the entry point. It resolves the compose config from a profile:
+
+```sh
+ula                        # ~/.config/ula/default/config.toml
+ula work                   # ~/.config/ula/work/config.toml
+ula compose ./config.toml   # explicit config file
+```
+
+Configuration is manual — copy `crates/ula-compose/example-config.toml` to the profile path above and `crates/ula-core/example-config.toml` to `~/.config/ula/config.toml`, then fill them in. At least one agent with a model must be configured.
 
 ## Adding a tool
 

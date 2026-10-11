@@ -28,6 +28,7 @@
 | **ula-ptc** | 负责工具调用等流程。接收 Core 的 Content，自行解析 `ula-ptc` 代码块，在 Luau 运行时中执行，通过 `coroutine.yield` 发起工具调用，输出 `PluginOutput`。 |
 | **ula-compose** | 负责传输信息。路由 Core 输出到 Plugin，把 Plugin 输出发回给 Core；启动时先收插件开机首帧聚合提示词；串行化权限提示。 |
 | **ula-tui** | 负责显示和发送用户消息。通过 UDS 与 Compose 通信，权限请求弹 modal。 |
+| **ula-cli** | 负责启动入口。按 profile（位置参数）定位 compose 配置，或用 `compose <file>` 显式指定；解析完 `exec` 替换为 compose 进程。 |
 
 ## 架构概览
 
@@ -58,7 +59,7 @@
 ## 执行流程
 
 ```
-启动：Compose 读配置 → 解析并拉起插件（任一失败即显式报错退出）→ 拉起 Core → 收插件开机首帧聚合提示词 → 拉起 UI
+启动：ula 按 profile 定位 compose 配置（无配置回落 compose 内置默认）→ exec 换成 Compose → 解析并拉起插件（任一失败即显式报错退出）→ 拉起 Core → 收插件开机首帧聚合提示词 → 拉起 UI
   Plugin ──首帧 PluginMeta{system_prompt}──► Compose（插件自推，无请求）
   Compose ──EventToCore::UserInteraction{ExtraSystemPrompt}──► Core
 
@@ -154,6 +155,7 @@
 - **日志只留一个出口**：stdout 全部留给数据流。compose 写日志文件（与 UDS 同一 run 目录），core/plugin 的 stderr 被 compose 管道收拢后打 tag 进同一文件；tui 在终端里画 inline viewport，不许往 stderr 写——任何直写终端的进程都会把 TUI 画布打穿。
 - **插件元数据分层**：能力与启动方式走 `ula-plugin.toml`（`name`/`provides`（默认空）/`exec`/可选 `install`，语言无关），compose 配置只回答「装了什么、从哪来」（source 字符串）——单一事实源在插件自身，配置不复述能力；开机首帧只带运行期贡献（system prompt）。查找顺序：XDG 数据目录 `<data dir>/ula/plugins/<name>/ula-plugin.toml`（用户覆盖系统）→ compose 内嵌 builtin（Rust 对象直插，不落盘）→ `github:owner/repo` 克隆到用户数据目录（`install` 命令只在首次克隆后转发执行一次）；都找不到 = 启动失败。`exec` 解析期即解析为绝对路径（插件 root 相对路径优先，其次 PATH）。compose 配置格式同为 TOML。
 - **插件语言无关**：插件 = 一条可执行命令 + stdin/stdout JSON-lines。插件管理器嵌在 compose，不内建任何语言工具链：编译型交二进制，脚本型走 `exec`/shebang，装依赖最多转发一条插件声明的 install 命令。
+- **单一入口，profile 分隔配置**：`ula [profile] [compose <file>]` 是唯一启动面。profile 决定 compose 配置路径 `$XDG_CONFIG_HOME/ula/<profile>/config.toml`（缺省 `default`），`compose <file>` 直接给路径、绕过 profile；CLI 解析完即 `exec` 换成 compose，不叠加进程。core 配置由 core 自己读 `$XDG_CONFIG_HOME/ula/config.toml`，与 compose 配置分离。compose 拿不到配置时回落内置默认（`ula-ptc` + `ula-tui`）——agent 模型不在默认值里，必须另行配置，否则启动失败。
 
 ## 代码风格
 
@@ -172,6 +174,7 @@
 | `crates/ula-tui/src/` | UI 实现 |
 | `crates/ula-ptc/` | Plugin 实现（Luau 工具调用，通过 stdin/stdout 连接 Compose）|
 | `crates/ula-protocol/src/` | 协议类型定义 |
+| `crates/ula-cli/src/` | 启动入口（profile / 子命令 → compose） |
 
 ## Pitfalls
 

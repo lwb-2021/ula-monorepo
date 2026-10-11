@@ -1,13 +1,11 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
-    sync::LazyLock,
 };
 
 use eyre::{OptionExt, Result, WrapErr, bail};
-use xdg::BaseDirectories;
 
-static XDG: LazyLock<BaseDirectories> = LazyLock::new(|| BaseDirectories::with_prefix("ula"));
+use crate::XDG;
 
 pub(super) fn find_installed(name: &str) -> Option<PathBuf> {
     XDG.find_data_file(format!("plugins/{name}/ula-plugin.toml"))

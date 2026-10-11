@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/ula-cli",
     "crates/ula-compose",
     "crates/ula-core",
     "crates/ula-protocol",

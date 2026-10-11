@@ -25,14 +25,15 @@ use smol::{Async, channel, future};
 use ula_protocol::core::{EventFromCore, EventToCore};
 use ula_protocol::interface::{UIReceive, UISend};
 use ula_protocol::universal::{MessageEvent, MessageEventType, UserInteraction};
+use xdg::BaseDirectories;
 
 use crate::config::ComposeConfig;
 use crate::core::Core;
 use crate::interface::Interface;
-use crate::plugin::{PluginManager, PluginState};
+use crate::plugin::{PluginManager, PluginSource, PluginState};
 use crate::utils::{LineSink, json_line};
 
-pub static PATH: LazyLock<OsString> = LazyLock::new(|| {
+static PATH: LazyLock<OsString> = LazyLock::new(|| {
     env::join_paths(
         [env::current_exe()
             .expect("Unable to get current exe path")
@@ -44,6 +45,8 @@ pub static PATH: LazyLock<OsString> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+static XDG: LazyLock<BaseDirectories> = LazyLock::new(|| BaseDirectories::with_prefix("ula"));
 
 type Task = Pin<Box<dyn Future<Output = ()>>>;
 
@@ -57,22 +60,21 @@ fn main() {
         ))
         .init();
 
-    let config_path = args()
-        .nth(1)
-        .map(PathBuf::from)
-        .or_else(|| {
-            #[cfg(debug_assertions)]
-            {
-                Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("example-config.toml"))
-            }
-            #[cfg(not(debug_assertions))]
-            None
-        })
-        .expect("No config provided");
+    let config_path = args().nth(1).map(PathBuf::from);
 
-    let config: ComposeConfig =
+    let config = if let Some(config_path) = config_path {
         toml::from_str(&std::fs::read_to_string(&config_path).expect("Failed to read config"))
-            .expect("Failed to parse config");
+            .expect("Failed to parse config")
+    } else {
+        warn!("Cannot get config, using default one");
+        ComposeConfig {
+            agents: vec![],
+            plugins: vec![PluginSource::SelfHosted {
+                name: "ula-ptc".into(),
+            }],
+            interface: "ula-tui".to_string(),
+        }
+    };
 
     if let Err(e) = run(config) {
         error!("[compose] startup failed: {e:#}");
