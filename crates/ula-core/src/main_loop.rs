@@ -46,6 +46,10 @@ pub async fn main_loop(model: String) -> eyre::Result<()> {
                             Ok(())
                         }
                     },
+                    EventToCore::Compact { summary } => {
+                        session.compact(summary);
+                        Ok(())
+                    }
                 })
                 .await
                 .inspect_err(|_: &anyhow::Error| notify_exit(&exit))

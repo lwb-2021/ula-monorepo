@@ -48,6 +48,13 @@ fn main() -> anyhow::Result<()> {
                 };
                 emit(&output)?;
             }
+            PluginInput::CompactRequest {
+                full_conversation: _,
+            } => {
+                return Err(anyhow!(
+                    "compaction is not supported: `ula-ptc` does not provide the context_manager capability"
+                ));
+            }
         }
     }
 }

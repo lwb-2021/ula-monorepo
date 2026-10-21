@@ -15,7 +15,7 @@ use log::warn;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use smol::stream::StreamExt;
-use tap::{Tap, TapOptional};
+use tap::{Pipe, Tap, TapOptional};
 use ula_protocol::core::EventFromCore;
 use ula_protocol::universal::{MessageEvent, MessageEventType};
 
@@ -38,6 +38,9 @@ struct SessionRuntimeState {
 
     notify: Notify,
     interrupt: Arc<AtomicBool>,
+
+    last_usage: Mutex<Option<u32>>,
+    compacting: AtomicBool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -81,8 +84,16 @@ impl Session {
     }
 
     pub fn queue_message(&self, message: String) {
-        self.state.notify.notify_n(NonZero::new(1).unwrap());
         self.message_queue.lock().push_back(message);
+        self.state.notify.notify_n(NonZero::new(1).unwrap());
+    }
+
+    pub fn compact(&self, summary: String) {
+        self.conversation
+            .rcu(|conversation| conversation.compact(summary.clone()));
+        self.state.last_usage.lock().take();
+        self.state.compacting.store(false, Ordering::Release);
+        self.state.notify.notify();
     }
 
     pub async fn poll(&self) -> Result<(), APIError> {
@@ -100,6 +111,19 @@ impl Session {
 
         if self.should_wait() {
             self.state.notify.notified().await;
+            return Ok(());
+        }
+
+        if self.state.compacting.load(Ordering::Acquire) {
+            self.state.notify.notified().await;
+            return Ok(());
+        }
+
+        if self.should_compact() {
+            self.state.compacting.store(true, Ordering::Release);
+            write_event(&EventFromCore::CompactRequest {
+                full_conversation: self.conversation.load().to_full_conversation_string(),
+            });
             return Ok(());
         }
 
@@ -131,7 +155,8 @@ impl Session {
                         message_type: MessageEventType::Streaming,
                     },
                 });
-                Ok(Accum {
+
+                Accum {
                     reasoning: prev
                         .reasoning
                         .tap_some_mut(|prev_reasoning| {
@@ -139,10 +164,11 @@ impl Session {
                         })
                         .or(reasoning),
                     content: prev.content.tap_mut(|x| x.push_str(&content)),
-                })
+                }
+                .pipe(Ok)
             }
-            ModelResponse::Usage => {
-                warn!("TODO: usage");
+            ModelResponse::Usage { total, .. } => {
+                self.state.last_usage.lock().replace(total);
                 Ok(prev)
             }
             ModelResponse::End => {
@@ -164,10 +190,8 @@ impl Session {
             },
         });
 
-        let message = ConversationItem::Assistant {
-            reasoning: assistant_response.reasoning,
-            content: assistant_response.content,
-        };
+        let message =
+            ConversationItem::assistant(assistant_response.reasoning, assistant_response.content);
 
         self.conversation
             .rcu(|conversation| conversation.push_new(message.clone()));
@@ -185,13 +209,21 @@ impl Session {
             || (self.state.stream.lock().is_none() && self.message_queue.lock().is_empty())
     }
 
-    pub fn interrupt(&self) {
-        self.state.interrupt.store(true, Ordering::Release);
-        self.state.notify.notify();
+    fn should_compact(&self) -> bool {
+        let config = CONFIG.load();
+        let Some(window) = config.context_window else {
+            return false;
+        };
+        self.state
+            .last_usage
+            .lock()
+            .is_some_and(|usage| usage as f32 >= config.context_limit * window as f32)
     }
 
-    /// Ends the current turn on a request error: drops the provider, reports the
-    /// error to the UI and suspends until the user sends the next message.
+    pub fn interrupt(&self) {
+        self.state.interrupt.store(true, Ordering::Release);
+    }
+
     async fn abort(&self, error: APIError) -> Result<(), APIError> {
         warn!("poll aborted: {error}");
         self.state.provider_instance.store(None);
@@ -238,11 +270,8 @@ impl Session {
 
             self.state.stream.lock().replace(stream);
 
-            self.conversation.rcu(|conversation| {
-                conversation.push_new(ConversationItem::User {
-                    content: message.clone(),
-                })
-            });
+            self.conversation
+                .rcu(|conversation| conversation.push_new(ConversationItem::user(message.clone())));
             self.save()?;
         }
         Ok(())

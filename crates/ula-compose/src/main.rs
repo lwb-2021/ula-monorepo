@@ -32,6 +32,7 @@ use crate::core::Core;
 use crate::interface::Interface;
 use crate::plugin::{PluginManager, PluginSource, PluginState};
 use crate::utils::{LineSink, json_line};
+use ula_protocol::plugin::PluginCapability;
 
 static PATH: LazyLock<OsString> = LazyLock::new(|| {
     env::join_paths(
@@ -283,6 +284,7 @@ async fn event_dispatch(
                     warn!("[compose] core error: {error_msg}");
                     UIReceive::Error { error: error_msg }
                 }
+                EventFromCore::CompactRequest { .. } => return,
             };
 
             if to_ui.send(message).await.is_err() {
@@ -386,43 +388,93 @@ async fn plugin_worker(
     let name = plugin.name().to_owned();
 
     while let Some(event) = events.next().await {
-        let EventFromCore::Message {
-            message:
-                MessageEvent {
-                    content,
-                    message_type: MessageEventType::Content,
-                    ..
-                },
-        } = event
-        else {
-            continue;
-        };
+        let message = match event {
+            EventFromCore::Message {
+                message:
+                    MessageEvent {
+                        content,
+                        message_type: MessageEventType::Content,
+                        ..
+                    },
+            } => {
+                info!(
+                    "[compose] content ({} bytes) → plugin `{name}`",
+                    content.len()
+                );
 
-        info!(
-            "[compose] content ({} bytes) → plugin `{name}`",
-            content.len()
-        );
-
-        let reply = match plugin.call(&content, &permission).await {
-            Ok(reply) => reply,
-            Err(e) => {
-                error!("[plugin] {name}: {e}, restarting");
-                match plugin.restart().await {
-                    Ok(restarted) => {
-                        plugin = restarted;
-                        continue;
-                    }
+                let reply = match plugin.call(&content, &permission).await {
+                    Ok(reply) => reply,
                     Err(e) => {
-                        error!("[plugin] {name}: unable to restart: {e}");
-                        return;
+                        error!("[plugin] {name}: {e}, restarting");
+                        match plugin.restart().await {
+                            Ok(restarted) => {
+                                plugin = restarted;
+                                continue;
+                            }
+                            Err(e) => {
+                                error!("[plugin] {name}: unable to restart: {e}");
+                                return;
+                            }
+                        }
+                    }
+                };
+
+                let Some(message) = reply else {
+                    info!("[plugin] {name}: idle");
+                    continue;
+                };
+                message
+            }
+            EventFromCore::CompactRequest { full_conversation } => {
+                if !plugin.provides(PluginCapability::ContextManager) {
+                    continue;
+                }
+
+                info!(
+                    "[compose] compact request ({} bytes) → plugin `{name}`",
+                    full_conversation.len()
+                );
+
+                let mut restarted = false;
+                loop {
+                    match plugin.compact(&full_conversation, &permission).await {
+                        Ok(summary) => {
+                            info!(
+                                "[plugin] {name}: compaction summary ({} bytes)",
+                                summary.len()
+                            );
+
+                            if to_core
+                                .send(EventToCore::Compact { summary })
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                            break;
+                        }
+                        Err(e) if restarted => {
+                            error!("[plugin] {name}: cannot compact: {e}");
+                            return;
+                        }
+                        Err(e) => {
+                            error!("[plugin] {name}: cannot compact: {e}, restarting");
+                            match plugin.restart().await {
+                                Ok(fresh) => {
+                                    plugin = fresh;
+                                    restarted = true;
+                                }
+                                Err(e) => {
+                                    error!("[plugin] {name}: unable to restart: {e}");
+                                    return;
+                                }
+                            }
+                        }
                     }
                 }
+                continue;
             }
-        };
-
-        let Some(message) = reply else {
-            info!("[plugin] {name}: idle");
-            continue;
+            _ => continue,
         };
 
         info!("[plugin] {name}: {} bytes → core", message.len());

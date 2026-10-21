@@ -6,6 +6,7 @@ use std::pin::Pin;
 use async_trait::async_trait;
 use once_cell::sync::OnceCell;
 use smol::stream::Stream;
+use tap::Pipe;
 
 use crate::{
     adapter::{
@@ -23,7 +24,10 @@ pub enum ModelResponse {
         reasoning: Option<String>,
         content: String,
     },
-    Usage,
+    Usage {
+        total: u32,
+        cached: u32,
+    },
     End,
 }
 
@@ -70,14 +74,15 @@ pub async fn get_provider(config: ProviderConfig) -> Result<Provider, APIError> 
         .to_string();
 
     match config.endpoint.as_str() {
-        "chat_completions" => Ok(Provider {
+        "chat_completions" => Provider {
             inner: Box::new(OpenAICompatibleChatCompletionProviderBehavior),
             info: ProviderInfo {
                 base_url,
                 api_key_command: config.api_key_command.clone(),
                 session: OnceCell::new(),
             },
-        }),
+        }
+        .pipe(Ok),
         endpoint => APIError::UnsupportedEndpoint {
             name: endpoint.to_string(),
         }

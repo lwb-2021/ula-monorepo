@@ -24,9 +24,9 @@
 
 | 模块 | 职责 |
 |------|------|
-| **ula-core** | 负责 LLM 对话。输入用户消息，输出 `EventFromCore`（Message/Error，`MessageEvent.message_type` 区分 streaming/content）。不处理 UI，不处理 Plugin。 |
+| **ula-core** | 负责 LLM 对话。输入用户消息，输出 `EventFromCore`（Message/Error/CompactRequest，`MessageEvent.message_type` 区分 streaming/content）。按真实 usage 刹车，压缩本身交给 Plugin。不处理 UI，不处理 Plugin。 |
 | **ula-ptc** | 负责工具调用等流程。接收 Core 的 Content，自行解析 `ula-ptc` 代码块，在 Luau 运行时中执行，通过 `coroutine.yield` 发起工具调用，输出 `PluginOutput`。 |
-| **ula-compose** | 负责传输信息。路由 Core 输出到 Plugin，把 Plugin 输出发回给 Core；启动时先收插件开机首帧聚合提示词；串行化权限提示。 |
+| **ula-compose** | 负责传输信息。路由 Core 输出到 Plugin，把 Plugin 输出发回给 Core；压缩请求按能力定向路由、摘要回灌 Core；启动时先收插件开机首帧聚合提示词；串行化权限提示。 |
 | **ula-tui** | 负责显示和发送用户消息。通过 UDS 与 Compose 通信，权限请求弹 modal。 |
 | **ula-cli** | 负责启动入口。按 profile（位置参数）定位 compose 配置，或用 `compose <file>` 显式指定；解析完 `exec` 替换为 compose 进程。 |
 
@@ -94,6 +94,12 @@
                      SendMessage{result} ──► EventToCore 回灌 Core
                      Idle                  ──► 丢弃（不回灌，避免死循环）
                      Request{…}            ──► 权限提示，见下
+                     Compact{summary}      ──► 仅压缩轮：EventToCore::Compact 回灌 Core
+
+压缩流（能力路由，只发声明 ContextManager 的插件）：
+  Core ──CompactRequest{full_conversation}──► Compose（不进 UI 流）
+  Compose ──PluginInput::CompactRequest──► 有能力插件（其余 worker 忽略）
+  插件 ──PluginOutput::Compact{summary}──► Compose ──EventToCore::Compact──► Core
 
 权限流（同一时刻至多一个提示）：
   Plugin ──PluginOutput::Request──► Compose prompter
@@ -103,6 +109,8 @@
 ```
 
 超时语义：开机首帧（`PluginMeta`）整体 10s；插件调用中每行 IO 120s（插件不再说话才算死）；**权限等待不计时**——用户离开工位不应导致插件被重启。UI 断连走全局 shutdown。
+
+中断语义：`Interrupt` 在流式生成中立即 drop 响应流（HTTP 连接随之中止），已累积的部分以正常 `Content` 轮落账——UI 解除 busy，历史与用户所见一致；不在流中时仅消费标志。插件调用中的 Interrupt 尚未路由给插件（core 不感知插件状态）。
 
 ## IPC 设计
 
@@ -115,12 +123,12 @@
 
 ### 协议类型 (ula-protocol)
 
-- `EventFromCore`: Message{message} / Error{error_msg}
-- `EventToCore`: UserInteraction{interaction}
+- `EventFromCore`: Message{message} / Error{error_msg} / CompactRequest{full_conversation}
+- `EventToCore`: UserInteraction{interaction} / Compact{summary}
 - `MessageEvent` / `MessageEventType`: 消息载荷，`message_type` 为 streaming / content / full_conversation（后者预留）
 - `UserInteraction`: Text / ExtraSystemPrompt / Interrupt（`UISend`、`EventToCore` 的共享载荷）
-- `PluginInput`: Message（首帧之后的下行）
-- `PluginOutput`: SendMessage / Idle / Request（首帧不上行，`PluginMeta` 独立于流外）
+- `PluginOutput`: SendMessage / Idle / Request / Compact{summary}（首帧不上行，`PluginMeta` 独立于流外）
+- `PluginInput`: Message / CompactRequest{full_conversation}（首帧之后的下行）
 - `PluginMeta`: 开机首帧，携带 `system_prompt: Option<String>`，插件自推
 - `PluginCapability`: 能力枚举（`ContextManager`），manifest `provides` 的注册键
 - `PluginRequestResponse`: Allowed / Rejected{reason} / Interrupt
@@ -131,18 +139,18 @@
 
 **Wire 约定**：所有协议枚举统一 serde 默认外部标签 + `#[serde(rename_all = "snake_case")]`，wire 形如 `{"message":{...}}`、`{"text":"..."}`（作为字段嵌套复用的载荷枚举 `UserInteraction` 同样适用）；struct 变体优先，newtype 变体内必须是 struct。派生统一 `Debug, Clone, PartialEq, Eq, Serialize, Deserialize`。
 
-## 上下文管理（设计定稿，未实现）
+## 上下文管理（刹车与压缩已接线，窗口表未实现）
 
-1. **刹车在 core**：core 在发请求前估算将发的 messages，达到 `context_limit`（配置，默认 0.8）即停止放行，发 `EventFromCore::ContextFull`（新增）。
-2. **分母自动探测**：`context_window` 优先从 OpenAI 兼容端点 `{base_url}/models/{model}` 的 `context_length` 自动识别，配置兜底；未探测到且未配置 = 不刹车。
-3. **能力路由，不广播**：plugin 在仓库根的 `ula-plugin.toml` 中声明 `provides`（`PluginCapability`）；core 的 ContextFull 只路由给声明 `ContextManager` 能力的 plugin。**同一能力被多个 plugin 声明 = 启动即报冲突**，不做静默仲裁（仲裁函数留给将来的插件管理器）。
-4. **单原语 Fork**：`Fork { from: Genesis | Window(id), seed }`。开新上下文 = `from: Genesis` 的退化情形；`seed` 装压缩指令，旧内容不走 IPC（core 手里的 Conversation 才是源数据）。UI 侧同样需要 fork（从历史窗口分叉），锚点语义进 `UISend`/`UIReceive`。
+1. **刹车在 core**：core 在发请求前读上一次请求的真实 `Usage.total`，达到 `context_limit * context_window`（默认 0.8）即停止放行，发 `EventFromCore::CompactRequest`；`context_window` 未配置 = 不刹车。插件回 `EventToCore::Compact` 后 core 清空计数器、重开窗口并继续。等待期间新消息留在队列里，不会打到将要被替换的窗口上。
+2. **分母自动探测**：`context_window` 优先从 OpenAI 兼容端点 `{base_url}/models/{model}` 的 `context_length` 自动识别，配置兜底；未探测到且未配置 = 不刹车。**探测尚未实现**，当前只读配置。
+3. **能力路由，不广播**：plugin 在仓库根的 `ula-plugin.toml` 中声明 `provides`（`PluginCapability`）；core 的 CompactRequest 只路由给声明 `ContextManager` 能力的 plugin，其余 plugin 的 worker 直接忽略。**同一能力被多个 plugin 声明 = 启动即报冲突**，不做静默仲裁。
+4. **压缩载荷**：core 把当前可见窗口渲染成 `<USER>` / `<ASSISTANT>` 文本段发给插件（不含系统提示词），插件只回一段摘要文本；摘要成为新窗口的唯一种子。`Fork { from: Genesis | Window(id), seed }` 原语与 UI 侧分叉**尚未实现**。
 5. **窗口数据结构**：`Conversation` 基于 rpds 持久化结构，fork = O(1) Arc clone；Session 从单 conversation 演进为「活动窗口 + 存档窗口表」，同一时刻只有一个活动窗口。
 6. **系统提示词铁律**：`ConversationItem::System` 是占位符，构建请求时物化 `SYSTEM_PROMPT` 单例——新窗口自动携带当前提示词，协议载荷不带系统提示词。`SYSTEM_PROMPT` 只在启动握手时聚合一次、之后 append-only（`rcu` 追加），**fork 永不重新聚合、永不重新握手**，否则提示词翻倍。
 7. **摘要策略**：head 做摘要、tail 保原文（最近若干轮原样保留，模型刚看过、细节最活）；system prompt 与硬规则每窗口重新注入，不进摘要。压缩量过大时分块 map-reduce，循环由 plugin 编排（plugin 的协程状态机天然适合多轮循环），core 只提供 Fork 与刹车。
-8. **压缩轮是内部轮**：不以普通聊天形态渲染进 UI（复用 `MessageEventType::FullConversation` 语义标记）。
-9. **无能力 plugin = 纯卡**：core 刹车后没人回 Fork 就一直等。用户不装上下文管理，假定他不想要（不做降级截断兜底）。
-10. **计数**：以真实 `Usage`（`stream_options.include_usage`）为准。字符估算已否决——对中文对话低估约 4 倍，刹车永远不会触发。Usage 落地前不实现计数，只留 `warn!("TODO: usage")` 占位。
+8. **压缩轮是内部轮**：不以普通聊天形态渲染进 UI——compose 把 CompactRequest 从 UI 流里摘掉，只转给有能力插件。
+9. **无能力 plugin = 纯卡**：core 刹车后没人回 Compact 就一直等。用户不装上下文管理，假定他不想要（不做降级截断兜底）。有能力插件压缩失败时 compose 重启它并重试一次，仍失败则明确报错并终结该 worker。
+10. **计数**：以真实 `Usage`（`stream_options.include_usage`）为准，`total_tokens` 即刹车依据。字符估算已否决——对中文对话低估约 4 倍，刹车永远不会触发。
 
 ## 设计约定
 

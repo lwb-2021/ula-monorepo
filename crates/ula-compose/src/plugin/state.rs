@@ -10,7 +10,9 @@ use futures_util::SinkExt;
 use smol::channel;
 use smol::io::{AsyncBufReadExt, BufReader};
 use smol::{Async, future};
-use ula_protocol::plugin::{PluginInput, PluginMeta, PluginOutput, PluginRequestResponse};
+use ula_protocol::plugin::{
+    PluginCapability, PluginInput, PluginMeta, PluginOutput, PluginRequestResponse,
+};
 
 use crate::PATH;
 use crate::permission::Ask;
@@ -26,16 +28,26 @@ const IO_TIMEOUT: Duration = Duration::from_secs(120);
 /// Upper bound on permission prompts per call, so a misbehaving plugin cannot spin us forever.
 const MAX_PERMISSION_REQUESTS: usize = 8;
 
+enum Reply {
+    Message(String),
+    Compact(String),
+}
+
 pub struct PluginState {
     name: String,
     exec: PathBuf,
+    provides: Box<[PluginCapability]>,
     stdin: LineSink<Async<ChildStdin>>,
     stdout: BufReader<Async<ChildStdout>>,
     child: ChildGuard,
 }
 
 impl PluginState {
-    pub fn start(name: String, exec: PathBuf) -> PluginResult<Self> {
+    pub fn start(
+        name: String,
+        exec: PathBuf,
+        provides: Box<[PluginCapability]>,
+    ) -> PluginResult<Self> {
         let mut child: Child = match Command::new(&exec)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -61,6 +73,7 @@ impl PluginState {
         Ok(Self {
             name,
             exec,
+            provides,
             stdin: FramedWrite::new(stdin, LinesCodec),
             stdout: BufReader::new(stdout),
             child,
@@ -69,6 +82,10 @@ impl PluginState {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn provides(&self, capability: PluginCapability) -> bool {
+        self.provides.contains(&capability)
     }
 
     pub async fn handshake(&mut self) -> PluginResult<Option<String>> {
@@ -82,13 +99,44 @@ impl PluginState {
         content: &str,
         permission: &channel::Sender<Ask>,
     ) -> PluginResult<Option<String>> {
-        self.call_inner(content, permission).await
+        self.send_with_timeout(&PluginInput::Message {
+            content: content.to_owned(),
+        })
+        .await?;
+
+        match self.exchange(permission).await? {
+            Some(Reply::Message(message)) => Ok(Some(message)),
+            Some(Reply::Compact(summary)) => Err(PluginError::UnexpectedCompact { summary }),
+            None => Ok(None),
+        }
+    }
+
+    pub async fn compact(
+        &mut self,
+        full_conversation: &str,
+        permission: &channel::Sender<Ask>,
+    ) -> PluginResult<String> {
+        self.send_with_timeout(&PluginInput::CompactRequest {
+            full_conversation: full_conversation.to_owned(),
+        })
+        .await?;
+
+        match self.exchange(permission).await? {
+            Some(Reply::Compact(summary)) => Ok(summary),
+            Some(Reply::Message(message)) => Err(PluginError::UnexpectedMessage { message }),
+            None => Err(PluginError::Idle),
+        }
     }
 
     pub async fn restart(mut self) -> PluginResult<Self> {
         self.child.kill();
-        let Self { name, exec, .. } = self;
-        let mut fresh = Self::start(name, exec)?;
+        let Self {
+            name,
+            exec,
+            provides,
+            ..
+        } = self;
+        let mut fresh = Self::start(name, exec, provides)?;
         fresh.handshake().await?;
         Ok(fresh)
     }
@@ -102,23 +150,12 @@ impl PluginState {
         Ok(meta.system_prompt)
     }
 
-    async fn call_inner(
-        &mut self,
-        content: &str,
-        permission: &channel::Sender<Ask>,
-    ) -> PluginResult<Option<String>> {
-        with_timeout(
-            IO_TIMEOUT,
-            self.send(&PluginInput::Message {
-                content: content.to_owned(),
-            }),
-        )
-        .await?;
-
+    async fn exchange(&mut self, permission: &channel::Sender<Ask>) -> PluginResult<Option<Reply>> {
         let mut requests = 0;
         loop {
             match with_timeout(IO_TIMEOUT, self.recv()).await? {
-                PluginOutput::SendMessage { message } => return Ok(Some(message)),
+                PluginOutput::SendMessage { message } => return Ok(Some(Reply::Message(message))),
+                PluginOutput::Compact { summary } => return Ok(Some(Reply::Compact(summary))),
                 PluginOutput::Idle => return Ok(None),
                 PluginOutput::Request {
                     request_type,
@@ -133,10 +170,14 @@ impl PluginState {
 
                     let response =
                         ask_permission(permission, &self.name, request_type, payload).await;
-                    with_timeout(IO_TIMEOUT, self.send(&response)).await?;
+                    self.send_with_timeout(&response).await?;
                 }
             }
         }
+    }
+
+    async fn send_with_timeout(&mut self, message: &impl serde::Serialize) -> PluginResult<()> {
+        with_timeout(IO_TIMEOUT, self.send(message)).await
     }
 
     async fn send(&mut self, message: &impl serde::Serialize) -> PluginResult<()> {

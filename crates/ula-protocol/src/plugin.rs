@@ -19,6 +19,7 @@ pub struct PluginMeta {
 #[serde(rename_all = "snake_case")]
 pub enum PluginInput {
     Message { content: String },
+    CompactRequest { full_conversation: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,6 +32,10 @@ pub enum PluginOutput {
     Request {
         request_type: String,
         payload: HashMap<String, String>,
+    },
+
+    Compact {
+        summary: String,
     },
 }
 

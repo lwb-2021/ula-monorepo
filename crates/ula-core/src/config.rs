@@ -31,6 +31,10 @@ pub struct ProviderConfig {
 pub struct Config {
     pub http_timeout: u8,
 
+    pub context_limit: f32,
+
+    pub context_window: Option<u32>,
+
     pub providers: HashMap<String, ProviderConfig>,
     // pub permissions: HashMap<String, PermissionAction>,
 }
@@ -39,6 +43,10 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             http_timeout: 10,
+
+            context_limit: 0.8,
+
+            context_window: None,
 
             providers: HashMap::new(),
         }

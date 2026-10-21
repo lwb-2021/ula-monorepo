@@ -39,7 +39,7 @@ impl PluginManager {
             .into_iter()
             .map(|plugin| {
                 let name = plugin.manifest.name.clone();
-                PluginState::start(name.clone(), plugin.exec)
+                PluginState::start(name.clone(), plugin.exec, plugin.manifest.provides)
                     .wrap_err_with(|| format!("failed to start plugin `{name}`"))
             })
             .collect()
