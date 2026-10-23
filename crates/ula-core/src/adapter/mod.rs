@@ -2,7 +2,6 @@ mod conversation;
 mod errors;
 mod provider;
 mod session;
-mod sse_stream;
 mod utils;
 
 pub use errors::APIError;

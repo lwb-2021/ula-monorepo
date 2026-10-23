@@ -12,7 +12,7 @@ use crate::adapter::{
         APIEventStream, ModelResponse, ProviderBehavior, ProviderInfo,
         utils::{HttpExt, get_standard_session_creator},
     },
-    sse_stream::{SSEDecoder, SSEItem},
+    utils::{SSEDecoder, SSEItem},
 };
 
 #[derive(Debug, Serialize)]
@@ -20,6 +20,12 @@ struct RequestPayload<'a> {
     model: &'a str,
     messages: Vec<StandardMessage<'a>>,
     stream: bool,
+    stream_options: StreamOptions,
+}
+
+#[derive(Debug, Serialize)]
+struct StreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +91,9 @@ impl ProviderBehavior for OpenAICompatibleChatCompletionProviderBehavior {
             model,
             messages,
             stream: true,
+            stream_options: StreamOptions {
+                include_usage: true,
+            },
         })?;
 
         let request = Request::builder()
@@ -103,7 +112,7 @@ impl ProviderBehavior for OpenAICompatibleChatCompletionProviderBehavior {
                     if resp.choices.is_empty() {
                         let Some(usage) = resp.usage else {
                             return APIError::InvalidAPIFormat {
-                                message: format!("Expected usage information, found null"),
+                                message: "Expected usage information, found null".to_string(),
                             }
                             .raise();
                         };

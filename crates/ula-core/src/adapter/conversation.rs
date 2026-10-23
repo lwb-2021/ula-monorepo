@@ -66,6 +66,21 @@ impl Conversation {
         }
     }
 
+    pub fn pop(&self) -> Option<(ConversationItem, Self)> {
+        assert!(
+            self.inner.len() > self.last_visible_index,
+            "cannot pop the archived prefix"
+        );
+
+        Some((
+            self.inner.last()?.clone(),
+            Self {
+                inner: self.inner.drop_last()?,
+                last_visible_index: self.last_visible_index,
+            },
+        ))
+    }
+
     pub fn revert(&self, drop_nums: usize) -> eyre::Result<Self> {
         let remaining = self
             .inner
